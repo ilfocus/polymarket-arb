@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+import string
 
 from dotenv import load_dotenv
 
@@ -19,7 +20,9 @@ class Settings:
     market_id: str = os.getenv("POLYMARKET_MARKET_ID", "")
     yes_token_id: str = os.getenv("POLYMARKET_YES_TOKEN_ID", "")
     no_token_id: str = os.getenv("POLYMARKET_NO_TOKEN_ID", "")
-    ws_url: str = os.getenv("POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com")
+    ws_url: str = os.getenv(
+        "POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com"
+    )
     target_pair_cost: float = float(os.getenv("TARGET_PAIR_COST", "0.99"))
     balance_slack: float = float(os.getenv("BALANCE_SLACK", "0.15"))
     order_size: float = float(os.getenv("ORDER_SIZE", "50"))
@@ -31,6 +34,24 @@ class Settings:
     sim_balance: float = float(os.getenv("SIM_BALANCE", "0"))
     max_trades_per_market: int = int(os.getenv("MAX_TRADES_PER_MARKET", "0"))
     min_time_remaining_minutes: int = int(os.getenv("MIN_TIME_REMAINING_MINUTES", "0"))
+
+    def __post_init__(self) -> None:
+        self.private_key = normalize_private_key(self.private_key)
+        self.funder = self.funder.strip()
+
+
+def normalize_private_key(value: str) -> str:
+    value = (value or "").strip().strip('"').strip("'")
+    if not value:
+        return ""
+
+    hex_value = value[2:] if value.lower().startswith("0x") else value
+    if len(hex_value) != 64 or any(char not in string.hexdigits for char in hex_value):
+        raise ValueError(
+            "POLYMARKET_PRIVATE_KEY 必须是 64 位十六进制 EVM 私钥（可带 0x 前缀）；当前值看起来像 UUID/API Key，而不是钱包私钥"
+        )
+
+    return f"0x{hex_value.lower()}"
 
 
 def load_settings() -> Settings:

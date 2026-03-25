@@ -1,8 +1,12 @@
 # Polymarket API client
 py-clob-client
 
+# SOCKS proxy support for requests (used by py-clob-client)
+PySocks
+
 # HTTP client for market discovery and price fetching
-httpx==0.27.0
+# Include SOCKS support because local environments may expose ALL_PROXY=socks5://...
+httpx[socks]==0.27.0
 
 # Environment configuration
 python-dotenv==1.0.1
