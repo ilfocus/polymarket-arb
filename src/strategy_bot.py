@@ -281,6 +281,111 @@ class SimpleArbitrageBot:
             snapshots.append(order)
         return snapshots
 
+    def _get_current_position_sizes(self) -> tuple[float, float]:
+        """返回当前 UP / DOWN 持仓数量。"""
+        positions = get_positions(self.settings, [self.yes_token_id, self.no_token_id])
+        up_shares = positions.get(self.yes_token_id, {}).get("size", 0)
+        down_shares = positions.get(self.no_token_id, {}).get("size", 0)
+        return float(up_shares), float(down_shares)
+
+    def _cancel_live_orders(self, order_ids: list[str]) -> dict:
+        """撤销仍处于 open 状态的订单，避免继续扩大不平衡。"""
+        cancellable_statuses = {"live", "delayed", "unmatched"}
+        live_order_ids = []
+
+        for order in self._log_order_statuses(order_ids):
+            status = str(order.get("status", "")).lower()
+            order_id = order.get("id") or order.get("orderID")
+            if status in cancellable_statuses and order_id:
+                live_order_ids.append(order_id)
+
+        if not live_order_ids:
+            return {"canceled": [], "not_canceled": {}}
+
+        logger.warning(
+            "⚠️ 检测到仍在挂单的订单，正在撤销: " f"{', '.join(live_order_ids)}"
+        )
+        result = cancel_orders(self.settings, live_order_ids)
+        logger.warning(
+            "⚠️ 撤单结果: "
+            f"canceled={result.get('canceled', [])}, "
+            f"not_canceled={result.get('not_canceled', {})}"
+        )
+        return result
+
+    def _repair_position_imbalance(self, order_ids: list[str]) -> bool:
+        """
+        第一版仓位修复：
+        1. 先撤销仍然 live 的相关订单
+        2. 再对仓位较少的一边发起一次 FOK 补单
+        """
+        import time
+
+        self._cancel_live_orders(order_ids)
+        time.sleep(1)
+
+        up_shares, down_shares = self._get_current_position_sizes()
+        imbalance = abs(up_shares - down_shares)
+        if imbalance <= 0.1:
+            logger.info("✅ 撤单后仓位已恢复平衡")
+            return True
+
+        repair_yes_side = up_shares < down_shares
+        repair_token_id = self.yes_token_id if repair_yes_side else self.no_token_id
+        repair_label = "上涨" if repair_yes_side else "下跌"
+
+        price_up, price_down, size_up, size_down, best_up, best_down = (
+            self.get_current_prices()
+        )
+        repair_price = best_up if repair_yes_side else best_down
+        repair_liquidity = size_up if repair_yes_side else size_down
+
+        if not repair_price or repair_price <= 0:
+            logger.error(f"❌ 无法为{repair_label}侧获取有效补单价格，需人工处理")
+            return False
+
+        if repair_liquidity < imbalance:
+            logger.error(
+                f"❌ {repair_label}侧卖一深度不足以修复仓位: "
+                f"需要={imbalance:.2f}, 卖一数量={repair_liquidity:.2f}"
+            )
+            return False
+
+        logger.warning(
+            f"⚠️ 正在尝试修复仓位不平衡: 补买{repair_label} {imbalance:.2f} 股 "
+            f"@ ${repair_price:.4f} (FOK)"
+        )
+
+        try:
+            repair_result = place_order(
+                self.settings,
+                side="BUY",
+                token_id=repair_token_id,
+                price=repair_price,
+                size=imbalance,
+                tif="FOK",
+            )
+            repair_order_id = repair_result.get("orderID") or repair_result.get("id")
+            if repair_order_id:
+                logger.info(f"🧾 修复订单 ID: {repair_order_id}")
+                self._log_order_statuses([repair_order_id])
+        except Exception as exc:
+            logger.error(f"❌ 仓位修复下单失败: {exc}")
+            return False
+
+        time.sleep(1)
+        up_after, down_after = self._get_current_position_sizes()
+        remaining = abs(up_after - down_after)
+        if remaining <= 0.1:
+            logger.info("✅ 仓位修复成功，双边已重新平衡")
+            return True
+
+        logger.error(
+            "❌ 仓位修复后仍不平衡: "
+            f"上涨={up_after:.2f}, 下跌={down_after:.2f}, 差异={remaining:.2f}"
+        )
+        return False
+
     def get_current_prices(
         self,
     ) -> (
@@ -552,21 +657,18 @@ class SimpleArbitrageBot:
             import time
 
             time.sleep(1)  # 等待订单结算
-            if order_ids:
-                self._log_order_statuses(order_ids)
-
-            positions = get_positions(
-                self.settings, [self.yes_token_id, self.no_token_id]
-            )
-            up_shares = positions.get(self.yes_token_id, {}).get("size", 0)
-            down_shares = positions.get(self.no_token_id, {}).get("size", 0)
+            up_shares, down_shares = self._get_current_position_sizes()
 
             if abs(up_shares - down_shares) > 0.1:
                 logger.warning(f"⚠️ 检测到位置不平衡！")
                 logger.warning(f"   上涨股份: {up_shares:.2f}")
                 logger.warning(f"   下跌股份: {down_shares:.2f}")
                 logger.warning(f"   差异: {abs(up_shares - down_shares):.2f}")
-                logger.warning("   ⚠️ 可能需要人工干预以平衡位置")
+                if not self._repair_position_imbalance(order_ids):
+                    logger.error("❌ 自动仓位修复失败，本次套利不记为成功")
+                    self.refresh_balance_cache(force=True)
+                    self.show_current_positions()
+                    return
 
             logger.info("\n" + "=" * 70)
             logger.info("✅ 套利执行成功")

@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 _cached_client = None
 
 
+def _resolve_order_type(tif: str) -> OrderType:
+    tif_up = (tif or "GTC").upper()
+    if not hasattr(OrderType, tif_up):
+        raise ValueError(f"unsupported tif/order type: {tif}")
+    return getattr(OrderType, tif_up)
+
+
 def get_client(settings: Settings) -> ClobClient:
     global _cached_client
 
@@ -113,8 +120,7 @@ def place_order(
         # 客户端会从 token_id 自动检测 neg_risk
         signed_order = client.create_order(order_args)
 
-        # 以 GTC (Good-Til-Cancelled) 方式提交订单 - 保留在订单簿中直到成交
-        return client.post_order(signed_order, OrderType.GTC)
+        return client.post_order(signed_order, _resolve_order_type(tif))
     except Exception as exc:  # pragma: no cover - 从客户端传递
         raise RuntimeError(f"place_order failed: {exc}") from exc
 
