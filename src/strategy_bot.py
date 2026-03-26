@@ -15,7 +15,14 @@ import httpx
 
 from .config import load_settings
 from .market_lookup import fetch_market_from_slug
-from .trading_client import get_client, place_order, get_positions, place_orders_fast
+from .trading_client import (
+    cancel_orders,
+    get_client,
+    get_order,
+    get_positions,
+    place_order,
+    place_orders_fast,
+)
 from py_clob_client.clob_types import BookParams
 
 logging.basicConfig(
@@ -241,6 +248,38 @@ class SimpleArbitrageBot:
             return False
 
         return True
+
+    @staticmethod
+    def _extract_order_ids(results: list[dict]) -> list[str]:
+        """从下单响应中提取 order ids。"""
+        order_ids = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            order_id = result.get("orderID") or result.get("id")
+            if order_id:
+                order_ids.append(order_id)
+        return order_ids
+
+    def _log_order_statuses(self, order_ids: list[str]) -> list[dict]:
+        """查询并打印订单状态，便于后续风控处理。"""
+        snapshots = []
+        for order_id in order_ids:
+            try:
+                order = get_order(self.settings, order_id)
+            except Exception as exc:
+                logger.warning(f"⚠️ 查询订单状态失败: {order_id} - {exc}")
+                continue
+
+            status = order.get("status", "unknown")
+            size_matched = float(order.get("size_matched", 0) or 0)
+            original_size = float(order.get("original_size", 0) or 0)
+            logger.info(
+                f"📄 订单状态: id={order_id}, status={status}, "
+                f"filled={size_matched:.2f}/{original_size:.2f}"
+            )
+            snapshots.append(order)
+        return snapshots
 
     def get_current_prices(
         self,
@@ -487,21 +526,34 @@ class SimpleArbitrageBot:
 
             # 尽可能快地执行两个订单
             results = place_orders_fast(self.settings, orders)
+            order_ids = self._extract_order_ids(results)
 
             # 检查结果
             errors = [r for r in results if isinstance(r, dict) and "error" in r]
             if errors:
+                if order_ids:
+                    logger.warning("⚠️ 检测到部分下单成功，正在尝试撤销已提交订单...")
+                    cancel_result = cancel_orders(self.settings, order_ids)
+                    logger.warning(
+                        "⚠️ 撤单结果: "
+                        f"canceled={cancel_result.get('canceled', [])}, "
+                        f"not_canceled={cancel_result.get('not_canceled', {})}"
+                    )
                 for err in errors:
                     logger.error(f"❌ 订单错误: {err['error']}")
                 raise RuntimeError(f"Some orders failed: {errors}")
 
             logger.info(f"✅ 上涨订单已执行")
             logger.info(f"✅ 下跌订单已执行")
+            if order_ids:
+                logger.info(f"🧾 本次订单 IDs: {', '.join(order_ids)}")
 
             # 验证持仓是否平衡
             import time
 
             time.sleep(1)  # 等待订单结算
+            if order_ids:
+                self._log_order_statuses(order_ids)
 
             positions = get_positions(
                 self.settings, [self.yes_token_id, self.no_token_id]

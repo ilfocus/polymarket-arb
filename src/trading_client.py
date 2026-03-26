@@ -6,6 +6,7 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     BalanceAllowanceParams,
     AssetType,
+    OpenOrderParams,
     OrderArgs,
     OrderType,
     PostOrdersArgs,
@@ -148,6 +149,63 @@ def place_orders_fast(settings: Settings, orders: list[dict]) -> list[dict]:
         return client.post_orders(post_args)
     except Exception as exc:
         return [{"error": str(exc)}]
+
+
+def get_open_orders(
+    settings: Settings, *, market: str | None = None, asset_id: str | None = None
+) -> list[dict]:
+    """查询当前账户的 open orders。"""
+    try:
+        client = get_client(settings)
+        params = None
+        if market or asset_id:
+            params = OpenOrderParams(market=market, asset_id=asset_id)
+
+        result = client.get_orders(params) if params else client.get_orders()
+        return result if isinstance(result, list) else []
+    except Exception as exc:
+        logger.error(f"查询 open orders 失败: {exc}")
+        return []
+
+
+def get_order(settings: Settings, order_id: str) -> dict:
+    """查询单笔订单状态。"""
+    if not order_id:
+        raise ValueError("order_id is required")
+
+    try:
+        client = get_client(settings)
+        result = client.get_order(order_id)
+        return result if isinstance(result, dict) else {"raw": result}
+    except Exception as exc:
+        raise RuntimeError(f"get_order failed: {exc}") from exc
+
+
+def cancel_order(settings: Settings, order_id: str) -> dict:
+    """撤销单笔订单。"""
+    if not order_id:
+        raise ValueError("order_id is required")
+
+    try:
+        client = get_client(settings)
+        return client.cancel(order_id=order_id)
+    except Exception as exc:
+        raise RuntimeError(f"cancel_order failed: {exc}") from exc
+
+
+def cancel_orders(settings: Settings, order_ids: list[str]) -> dict:
+    """批量撤销订单。"""
+    valid_order_ids = [order_id for order_id in order_ids if order_id]
+    if not valid_order_ids:
+        return {"canceled": [], "not_canceled": {}}
+
+    try:
+        client = get_client(settings)
+        if len(valid_order_ids) == 1:
+            return client.cancel(order_id=valid_order_ids[0])
+        return client.cancel_orders(valid_order_ids)
+    except Exception as exc:
+        raise RuntimeError(f"cancel_orders failed: {exc}") from exc
 
 
 def get_positions(settings: Settings, token_ids: list[str] = None) -> dict:
