@@ -108,6 +108,8 @@ cp .env.example .env
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `TARGET_PAIR_COST` | `0.99` | UP+DOWN 总成本低于此值才触发套利（越低越保守） |
+| `BALANCE_SLACK` | `0.15` | 余额安全冗余，校验本次双边下单资金时会预留这部分 USDC |
+| `BALANCE_REFRESH_SECONDS` | `5` | 余额缓存刷新间隔；发现机会后只读取缓存，不再额外查余额 |
 | `ORDER_SIZE` | `50` | 每边买入的股数 |
 | `DRY_RUN` | `false` | `true`=模拟模式（不实际下单），`false`=真实交易 |
 | `MAX_TRADES_PER_MARKET` | `0` | 每个 15 分钟市场最大交易次数，`0`=不限制 |

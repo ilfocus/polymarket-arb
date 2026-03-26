@@ -137,8 +137,10 @@ class SimpleArbitrageBot:
         self.total_shares_bought = 0
         self.positions = []  # 未平仓持仓列表
 
-        # 缓存余额（每次交易后更新）
+        # 缓存余额（启动时初始化，并在后台周期刷新）
         self.cached_balance = None
+        self.cached_balance_updated_at = None
+        self.balance_cache_error = None
 
         # 当前市场的交易次数（每个新市场重置为0）
         self.current_market_trades = 0
@@ -165,6 +167,80 @@ class SimpleArbitrageBot:
         from .trading_client import get_balance
 
         return get_balance(self.settings)
+
+    def is_balance_cache_stale(self) -> bool:
+        """判断余额缓存是否过期。"""
+        if self.cached_balance_updated_at is None:
+            return True
+        age_seconds = (
+            datetime.now() - self.cached_balance_updated_at
+        ).total_seconds()
+        return age_seconds >= self.settings.balance_refresh_seconds
+
+    def refresh_balance_cache(self, force: bool = False) -> bool:
+        """
+        刷新余额缓存。
+        这个方法设计在扫描热路径之外周期调用，避免在发现机会后再额外查询余额。
+        """
+        if self.settings.dry_run:
+            return True
+
+        if not force and not self.is_balance_cache_stale():
+            return True
+
+        balance = self.get_balance()
+        if balance <= 0:
+            self.balance_cache_error = "balance_unavailable"
+            logger.warning("⚠️ 余额缓存刷新失败或余额为 0，当前将不允许真实下单")
+            return False
+
+        self.cached_balance = balance
+        self.cached_balance_updated_at = datetime.now()
+        self.balance_cache_error = None
+        logger.info(
+            "💰 余额缓存已刷新: "
+            f"${balance:.2f} "
+            f"(时间: {self.cached_balance_updated_at.strftime('%H:%M:%S')})"
+        )
+        return True
+
+    def has_sufficient_cached_balance(self, opportunity: dict) -> bool:
+        """
+        使用内存中的余额缓存快速判断是否允许下单。
+        不在发现机会后额外发起余额查询。
+        """
+        if self.settings.dry_run:
+            return True
+
+        if self.cached_balance is None or self.cached_balance_updated_at is None:
+            logger.warning("⚠️ 余额缓存未就绪，跳过本次机会以避免慢查询影响下单速度")
+            return False
+
+        if self.is_balance_cache_stale():
+            age_seconds = (
+                datetime.now() - self.cached_balance_updated_at
+            ).total_seconds()
+            logger.warning(
+                "⚠️ 余额缓存已过期，跳过本次机会: "
+                f"缓存年龄={age_seconds:.1f}s, "
+                f"刷新间隔={self.settings.balance_refresh_seconds:.1f}s"
+            )
+            return False
+
+        required_cash = opportunity["total_investment"]
+        available_cash = max(self.cached_balance - self.settings.balance_slack, 0)
+        if required_cash > available_cash:
+            logger.warning(
+                "⚠️ 余额不足，跳过本次机会: "
+                f"所需=${required_cash:.2f}, "
+                f"缓存余额=${self.cached_balance:.2f}, "
+                f"安全冗余=${self.settings.balance_slack:.2f}, "
+                f"可用=${available_cash:.2f}, "
+                f"缓存时间={self.cached_balance_updated_at.strftime('%H:%M:%S')}"
+            )
+            return False
+
+        return True
 
     def get_current_prices(
         self,
@@ -334,6 +410,9 @@ class SimpleArbitrageBot:
         logger.info(f"预期利润:           ${opportunity['expected_profit']:.2f}")
         logger.info("=" * 70)
 
+        if not self.has_sufficient_cached_balance(opportunity):
+            return
+
         # 检查剩余时间是否足够
         if self.settings.min_time_remaining_minutes > 0:
             if self.market_end_timestamp:
@@ -449,10 +528,8 @@ class SimpleArbitrageBot:
             self.total_shares_bought += opportunity["order_size"] * 2  # UP + DOWN
             self.positions.append(opportunity)
 
-            # 交易后更新缓存余额
-            new_balance = self.get_balance()
-            self.cached_balance = new_balance
-            logger.info(f"💰 更新后余额: ${new_balance:.2f}")
+            # 交易后刷新缓存余额；这一步不在抢单热路径中
+            self.refresh_balance_cache(force=True)
 
             # 获取并显示当前持仓
             self.show_current_positions()
@@ -599,6 +676,8 @@ class SimpleArbitrageBot:
         logger.info(f"模式: {'模拟' if self.settings.dry_run else '真实交易'}")
         logger.info(f"成本阈值: ${self.settings.target_pair_cost:.2f}")
         logger.info(f"订单数量: {self.settings.order_size} 股")
+        logger.info(f"余额安全冗余: ${self.settings.balance_slack:.2f}")
+        logger.info(f"余额刷新间隔: {self.settings.balance_refresh_seconds:.1f}秒")
         logger.info(f"扫描间隔: {interval_seconds}秒")
         if self.settings.max_trades_per_market > 0:
             logger.info(f"每场次最大交易次数: {self.settings.max_trades_per_market}")
@@ -615,6 +694,7 @@ class SimpleArbitrageBot:
         # 定期检查新市场的间隔（秒）
         market_check_interval = 60
         last_market_check = datetime.now()
+        self.refresh_balance_cache(force=True)
 
         try:
             while True:
@@ -649,6 +729,9 @@ class SimpleArbitrageBot:
                         self.show_final_summary()
                         scan_count = 0
                         continue
+
+                # 在扫描前刷新余额缓存，确保真正发现机会时只读内存状态
+                self.refresh_balance_cache()
 
                 self.run_once()
 
